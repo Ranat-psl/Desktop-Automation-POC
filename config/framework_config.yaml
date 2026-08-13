@@ -1,6 +1,7 @@
-# Minimal key-value config for Day-1 scaffold
+# Minimal key-value config for Day-2 scaffold
 backend: uia
 default_timeout_seconds: 10
 retry_attempts: 2
 retry_delay_seconds: 0.5
 require_approval_for_sensitive_actions: true
+log_level: WARNING

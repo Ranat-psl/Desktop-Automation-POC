@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from pywinauto import Application, Desktop
 
 from framework.core.models import Locator
 from framework.driver.locator_resolver import to_kwargs
+
+_log = logging.getLogger(__name__)
 
 
 class PyWinAutoAdapter:
@@ -17,7 +20,9 @@ class PyWinAutoAdapter:
         self._window = None
 
     def start(self, executable_path: str) -> None:
+        _log.debug("Starting application: %s (backend=%s)", executable_path, self.backend)
         self._app = Application(backend=self.backend).start(executable_path)
+        _log.debug("Application started")
 
     def connect(self, **kwargs: str) -> None:
         self._app = Application(backend=self.backend).connect(**kwargs)
@@ -39,7 +44,8 @@ class PyWinAutoAdapter:
 
         windows = []
         if process_id is not None:
-            deadline = time.time() + 8.0
+            _log.debug("Searching top-level windows by process id=%s", process_id)
+            deadline = time.time() + 2.0
             while time.time() < deadline:
                 windows = Desktop(backend=self.backend).windows(
                     process=process_id,
@@ -47,12 +53,14 @@ class PyWinAutoAdapter:
                     visible_only=True,
                 )
                 if windows:
+                    _log.debug("Found %d window(s) via process id", len(windows))
                     break
                 time.sleep(0.2)
 
         # Fallback: title-regex search on Desktop — handles Win11 Store apps that
         # spawn in a different host process than the launcher PID.
         if not windows:
+            _log.debug("No windows found by process id; trying title-regex fallback")
             search_hint = locator.value if locator.by in ("title", "class_name") else None
             if search_hint:
                 deadline2 = time.time() + 5.0
@@ -63,6 +71,7 @@ class PyWinAutoAdapter:
                         visible_only=True,
                     )
                     if windows:
+                        _log.debug("Found %d window(s) via title-regex", len(windows))
                         break
                     time.sleep(0.2)
 
@@ -70,38 +79,52 @@ class PyWinAutoAdapter:
             # Prefer a top-level window that has a title if available.
             titled_windows = [w for w in windows if w.window_text().strip()]
             self._window = titled_windows[0] if titled_windows else windows[0]
+            _log.debug("Focused window: '%s'", self._window.window_text())
         else:
+            _log.debug("Desktop search exhausted; falling back to app-bound lookup")
             try:
                 self._window = self._app.top_window()
             except Exception:
                 self._window = self._app.window(**to_kwargs(locator))
 
         self._window.set_focus()
+        _log.debug("set_focus() called")
 
     def click(self, locator: Locator) -> None:
         control = self._resolve_control(locator)
         control.click_input()
 
     def type_text(self, locator: Locator, text: str) -> None:
+        _log.debug("type_text: locator=%s|%s", locator.by, locator.value)
         control = self._resolve_control(locator)
         control.type_keys(text, with_spaces=True, set_foreground=True)
+        _log.debug("type_text: completed")
 
     def exists(self, locator: Locator, timeout_seconds: float = 5.0) -> bool:
+        _log.debug("exists: locator=%s|%s", locator.by, locator.value)
         try:
             control = self._resolve_control(locator)
         except Exception:
+            _log.debug("exists: control not found -> False")
             return False
         if hasattr(control, "exists"):
             # WindowSpecification supports exists(timeout=...).
-            return control.exists(timeout=timeout_seconds)
+            result = control.exists(timeout=timeout_seconds)
+            _log.debug("exists: WindowSpecification result=%s", result)
+            return result
         # Concrete UIAWrapper — resolution already confirmed it exists.
+        _log.debug("exists: UIAWrapper resolved -> True")
         return control is not None
 
     def get_text(self, locator: Locator) -> str:
+        _log.debug("get_text: locator=%s|%s", locator.by, locator.value)
         control = self._resolve_control(locator)
         try:
-            return str(control.window_text())
+            text = str(control.window_text())
+            _log.debug("get_text: result='%s'", text)
+            return text
         except Exception:
+            _log.debug("get_text: window_text() raised, returning empty string")
             return ""
 
     def _resolve_control(self, locator: Locator):
@@ -110,8 +133,10 @@ class PyWinAutoAdapter:
         kwargs = to_kwargs(locator)
         if hasattr(self._window, "child_window"):
             # WindowSpecification (from app.window()) — lazy resolution.
+            _log.debug("_resolve_control: WindowSpecification path for %s|%s", locator.by, locator.value)
             return self._window.child_window(**kwargs)
         # Concrete UIAWrapper (from Desktop.windows()) — search descendants directly.
+        _log.debug("_resolve_control: UIAWrapper.descendants() path for %s|%s", locator.by, locator.value)
         matches = self._window.descendants(**kwargs)
         if not matches:
             from framework.core.exceptions import LocatorResolutionError

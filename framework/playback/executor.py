@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from framework.assertions.validators import assert_exists, assert_text_equals
@@ -9,6 +10,8 @@ from framework.driver.desktop_driver import DesktopDriver
 from framework.playback.retry_policy import run_with_retry
 from framework.safety.approval_gate import ApprovalGate
 from framework.safety.policy import is_sensitive_action
+
+_log = logging.getLogger(__name__)
 
 
 class PlaybackExecutor:
@@ -22,12 +25,15 @@ class PlaybackExecutor:
                 self.approval_gate.require_approval(action)
 
             try:
+                _log.debug("Action start: %s", action.action_type.value)
                 run_with_retry(
                     lambda: self._execute(action),
                     attempts=retry_attempts,
                     delay_seconds=retry_delay_seconds,
                 )
+                _log.debug("Action success: %s", action.action_type.value)
             except Exception as exc:  # noqa: BLE001
+                _log.warning("Action failed: %s — %s", action.action_type.value, exc)
                 raise PlaybackExecutionError(f"Failed action {action.action_type}") from exc
 
     def _execute(self, action: Action) -> None:
