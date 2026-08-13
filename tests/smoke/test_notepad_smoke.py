@@ -23,7 +23,7 @@ def test_notepad_launch_and_type_smoke() -> None:
 
         # Focus top-level Notepad window and interact with the editor.
         driver.focus_window(Locator(by="class_name", value="Notepad"))
-        editor = Locator(by="control_type", value="Edit")
+        editor = Locator(by="control_type", value="Document")
 
         driver.type_text(editor, "Desktop Automation POC")
         assert driver.exists(editor, timeout_seconds=3)
