@@ -3,6 +3,10 @@ from __future__ import annotations
 from framework.core.models import Action, ActionType, Locator
 
 
+def launch(executable_path: str) -> Action:
+    return Action(action_type=ActionType.LAUNCH, value=executable_path)
+
+
 def click(by: str, value: str, *, timeout_seconds: float | None = None) -> Action:
     return Action(
         action_type=ActionType.CLICK,

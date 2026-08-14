@@ -41,6 +41,12 @@ class PlaybackExecutor:
             time.sleep(action.timeout_seconds or 0)
             return
 
+        if action.action_type is ActionType.LAUNCH:
+            if not action.value:
+                raise PlaybackExecutionError("LAUNCH action requires an executable path.")
+            self.driver.start(action.value)
+            return
+
         if action.locator is None:
             raise PlaybackExecutionError("Action requires a locator.")
 

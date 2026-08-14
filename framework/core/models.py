@@ -6,6 +6,7 @@ from typing import Any
 
 
 class ActionType(str, Enum):
+    LAUNCH = "launch"
     CLICK = "click"
     TYPE = "type"
     WAIT = "wait"
