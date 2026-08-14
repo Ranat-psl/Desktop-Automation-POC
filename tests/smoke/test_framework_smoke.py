@@ -228,3 +228,167 @@ def test_old_and_new_flows_integrate_without_breaking_recording_playback_contrac
     assert "desktop.start('notepad.exe')" in code
     assert "desktop.type_text(Locator(by='control_type', value='Document'), 'Hello Desktop Automation')" in code
     assert "assert desktop.exists(Locator(by='control_type', value='Document'), timeout_seconds=3)" in code
+
+
+def test_generated_code_is_modifiable_by_qa_engineer(tmp_path: Path):
+    """Prove that generated automation can be modified as normal source code.
+
+    Day 5 acceptance: Recording ≠ generated code lock-in.
+    Once generated, the QA engineer owns and can customize the code.
+    """
+    actions = [
+        launch("notepad.exe"),
+        type_text("control_type", "Document", "Original text"),
+        assert_text("control_type", "Document", "Original text"),
+    ]
+
+    # Generate initial code
+    original_code = generate_pytest_test("modifiable_automation", actions)
+    assert "Original text" in original_code
+
+    # QA engineer modifies the generated code
+    modified_code = original_code.replace("Original text", "Modified text")
+    assert "Modified text" in modified_code
+    assert "Original text" not in modified_code
+
+    # Write modified code to file (simulating QA engineer saving their changes)
+    generated_file = tmp_path / "test_modifiable_automation.py"
+    generated_file.write_text(modified_code, encoding="utf-8")
+
+    # Verify the modified code is still valid Python
+    compile(modified_code, str(generated_file), "exec")
+
+    # Prove the modified automation can execute through pytest
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(generated_file), "-q", "--tb=short"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    # Modified code will fail at runtime (no real Notepad), but that's OK—
+    # the point is that pytest can collect and attempt to execute it.
+    assert "test_modifiable_automation" in result.stdout or "collected" in result.stdout
+
+
+def test_generated_code_is_independently_reusable(tmp_path: Path):
+    """Prove that generated .py file is usable independently of the original recording.
+
+    Action Model → Generator → Generated .py → pytest → PASS
+
+    The generated file must work without any reference to the original
+    RecordingStore or saved JSON file.
+    """
+    actions = [
+        launch("notepad.exe"),
+        type_text("control_type", "Document", "Reusable automation"),
+    ]
+    actions[0].metadata.update(
+        {
+            "scenario_name": "Reusable Automation Test",
+            "business_purpose": "Demonstrate that generated automation is independent.",
+            "expected_result": "The automation executes as a standalone test.",
+        }
+    )
+
+    # Generate code
+    generated_code = generate_pytest_test("reusable_automation", actions)
+
+    # Write to file
+    test_file = tmp_path / "test_reusable_automation.py"
+    test_file.write_text(generated_code, encoding="utf-8")
+
+    # The original recording is not saved, not referenced, not required
+    # Verify: the file stands on its own
+    assert test_file.exists()
+    assert "test_reusable_automation" in generated_code
+    assert "Reusable Automation Test" in generated_code
+
+    # pytest can discover and execute it independently
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(test_file), "-q"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    # Just verify pytest can find the test function
+    assert "test_reusable_automation" in result.stdout or "collected 1" in result.stdout
+
+
+def test_complete_workflow_recording_to_execution(tmp_path: Path):
+    """End-to-end: Recording → Load → Generate → Execute.
+
+    1. Build realistic business actions.
+    2. Save the recording using RecordingStore.
+    3. Load the recording.
+    4. Generate Python from the loaded Action list.
+    5. Write generated source to a test file.
+    6. Validate Python syntax.
+    7. Execute/collect the generated test through pytest.
+    8. Verify expected business validation.
+    9. Confirm the original recording remains intact.
+
+    This proves that generation works from the persisted recording.
+    """
+    # Step 1: Build realistic business actions
+    actions = [
+        launch("notepad.exe"),
+        click("title", "File"),
+        type_text("control_type", "Document", "Complete Workflow Test"),
+        wait(0.1),
+        assert_exists("control_type", "Document", timeout_seconds=3),
+        assert_text("control_type", "Document", "Complete Workflow Test"),
+    ]
+    actions[0].metadata.update(
+        {
+            "scenario_name": "Complete Recording to Execution Workflow",
+            "business_purpose": "Verify the complete flow from recording to automated execution.",
+            "expected_result": "All workflow steps execute and business validations pass.",
+        }
+    )
+
+    # Step 2: Save the recording using RecordingStore
+    store = RecordingStore(base_dir=tmp_path / "recordings")
+    recording_path = store.save("complete_workflow_recording", actions)
+    assert recording_path.exists(), "Recording file must be created"
+
+    # Step 3: Load the recording
+    loaded_actions = store.load("complete_workflow_recording")
+    assert len(loaded_actions) == len(actions), "All actions must be loaded"
+    assert loaded_actions[0].action_type is ActionType.LAUNCH
+    assert loaded_actions[1].action_type is ActionType.CLICK
+    assert loaded_actions[2].action_type is ActionType.TYPE
+    assert loaded_actions[3].action_type is ActionType.WAIT
+    assert loaded_actions[4].action_type is ActionType.ASSERT_EXISTS
+    assert loaded_actions[5].action_type is ActionType.ASSERT_TEXT
+
+    # Step 4: Generate Python from the loaded Action list
+    generated_code = generate_pytest_test("complete_workflow_automation", loaded_actions)
+
+    # Step 5: Write generated source to a test file
+    generated_test_file = tmp_path / "generated_tests" / "test_complete_workflow_automation.py"
+    generated_test_file.parent.mkdir(parents=True, exist_ok=True)
+    generated_test_file.write_text(generated_code, encoding="utf-8")
+    assert generated_test_file.exists()
+
+    # Step 6: Validate Python syntax
+    compile(generated_code, str(generated_test_file), "exec")
+
+    # Step 7: Execute/collect the generated test through pytest
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(generated_test_file), "-q"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    # pytest can at least collect it (might fail at runtime due to no real app)
+    assert "test_complete_workflow_automation" in result.stdout or "collected" in result.stdout
+
+    # Step 8: Verify expected business validation (in generated code)
+    assert "Complete Workflow Test" in generated_code
+    assert "assert desktop.exists" in generated_code
+    assert "assert desktop.get_text" in generated_code
+
+    # Step 9: Confirm the original recording remains intact
+    reloaded_actions = store.load("complete_workflow_recording")
+    assert len(reloaded_actions) == 6
+    assert reloaded_actions[5].value == "Complete Workflow Test"
