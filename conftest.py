@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 import logging
+from typing import Generator
+
 import pytest
 
 
@@ -46,3 +48,19 @@ def session_metadata(artifact_folder: Path) -> Path:
     payload = {"framework": "desktop-automation-poc", "stage": "day-2"}
     meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return meta_path
+
+
+@pytest.fixture()
+def desktop_driver() -> Generator:
+    """Yield a DesktopDriver and guarantee the launched application is killed on teardown.
+
+    Kills the specific PID started during the test — does not affect other
+    running instances of the same executable.
+    """
+    from framework.driver.desktop_driver import DesktopDriver
+
+    driver = DesktopDriver()
+    try:
+        yield driver
+    finally:
+        driver.quit()

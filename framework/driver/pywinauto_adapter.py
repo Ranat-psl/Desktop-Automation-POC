@@ -116,6 +116,32 @@ class PyWinAutoAdapter:
         _log.debug("exists: UIAWrapper resolved -> True")
         return control is not None
 
+    def quit(self) -> None:
+        """Terminate the specific application process started by this adapter.
+
+        Kills by PID so only the process launched in this session is affected.
+        Safe to call even if the application was never started.
+        """
+        if self._app is None:
+            return
+        raw_process = getattr(self._app, "process", None)
+        if callable(raw_process):
+            raw_process = raw_process()
+        try:
+            pid = int(raw_process)
+        except (TypeError, ValueError):
+            _log.debug("quit: cannot determine PID — skipping kill")
+            return
+        _log.debug("quit: killing PID %d", pid)
+        import subprocess
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            check=False,
+            capture_output=True,
+        )
+        self._app = None
+        self._window = None
+
     def get_text(self, locator: Locator) -> str:
         _log.debug("get_text: locator=%s|%s", locator.by, locator.value)
         control = self._resolve_control(locator)

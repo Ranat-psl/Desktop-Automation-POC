@@ -30,3 +30,7 @@ class DesktopDriver:
 
     def get_text(self, locator: Locator) -> str:
         return self.adapter.get_text(locator)
+
+    def quit(self) -> None:
+        """Terminate the application process started by this driver session."""
+        self.adapter.quit()
