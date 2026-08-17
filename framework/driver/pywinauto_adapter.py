@@ -18,6 +18,7 @@ class PyWinAutoAdapter:
         self.backend = backend
         self._app: Application | None = None
         self._window = None
+        self._window_pid: int | None = None  # actual window process, may differ from _app.process on Win11
 
     def start(self, executable_path: str) -> None:
         _log.debug("Starting application: %s (backend=%s)", executable_path, self.backend)
@@ -87,6 +88,15 @@ class PyWinAutoAdapter:
             except Exception:
                 self._window = self._app.window(**to_kwargs(locator))
 
+        # Record the actual window process ID so quit() can kill it even when
+        # Win11 Store apps spawn in a host process different from _app.process.
+        try:
+            if hasattr(self._window, "process_id") and callable(self._window.process_id):
+                self._window_pid = int(self._window.process_id())
+                _log.debug("focus_window: window process_id=%d", self._window_pid)
+        except Exception:
+            pass
+
         self._window.set_focus()
         _log.debug("set_focus() called")
 
@@ -135,12 +145,22 @@ class PyWinAutoAdapter:
         _log.debug("quit: killing PID %d", pid)
         import subprocess
         subprocess.run(
-            ["taskkill", "/PID", str(pid), "/F"],
+            ["taskkill", "/PID", str(pid), "/F", "/T"],
             check=False,
             capture_output=True,
         )
+        # If the focused window belonged to a different process (Win11 Store app
+        # hosting scenario), kill that process too so no orphan windows remain.
+        if self._window_pid is not None and self._window_pid != pid:
+            _log.debug("quit: also killing window PID %d", self._window_pid)
+            subprocess.run(
+                ["taskkill", "/PID", str(self._window_pid), "/F", "/T"],
+                check=False,
+                capture_output=True,
+            )
         self._app = None
         self._window = None
+        self._window_pid = None
 
     def get_text(self, locator: Locator) -> str:
         _log.debug("get_text: locator=%s|%s", locator.by, locator.value)
