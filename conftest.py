@@ -1,9 +1,111 @@
+from __future__ import annotations
+
 from pathlib import Path
 import json
 import logging
-from typing import Generator
+import re as _re
+from typing import TYPE_CHECKING, Generator
 
 import pytest
+
+if TYPE_CHECKING:
+    from framework.reporting.collector import ExecutionCollector
+
+# ---------------------------------------------------------------------------
+# Execution dashboard — result collection
+# ---------------------------------------------------------------------------
+
+_collector: ExecutionCollector | None = None
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Create the result collector for this session."""
+    global _collector
+    from framework.reporting.collector import ExecutionCollector
+    suite = " ".join(str(a) for a in config.args) if config.args else "default"
+    _collector = ExecutionCollector(suite_name=suite)
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Feed every test report phase into the collector."""
+    if _collector is not None:
+        _collector.record_result(report)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Finalise collection, persist JSON, generate dashboard."""
+    if _collector is None:
+        return
+    _collector.finalise()
+    try:
+        json_path = _collector.save()
+        _generate_dashboard(json_path)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Dashboard generation failed (non-fatal): %s", exc
+        )
+
+
+def _generate_dashboard(json_path: Path) -> None:
+    from framework.reporting.dashboard import generate_dashboard, DEFAULT_OUTPUT
+    out = generate_dashboard(json_path, output_path=DEFAULT_OUTPUT)
+    logging.getLogger(__name__).info("Dashboard generated: %s", out)
+
+
+# ---------------------------------------------------------------------------
+# Screenshot → HTML report linkage
+# ---------------------------------------------------------------------------
+
+_SCREENSHOT_RE = _re.compile(r"Failure screenshot:\s*([^\n]+\.png)", _re.IGNORECASE)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Attach failure screenshots to the pytest-html report when available."""
+    outcome = yield
+    report = outcome.get_result()
+
+    if report.when == "call" and report.failed:
+        _attach_screenshot_to_report(report)
+
+
+def _attach_screenshot_to_report(report) -> None:
+    """Parse the failure message for a screenshot path and embed it as HTML extra."""
+    try:
+        from pytest_html import extras  # type: ignore[import]
+    except ImportError:
+        return  # pytest-html not installed; skip silently
+
+    try:
+        longrepr_text = str(report.longrepr) if report.longrepr else ""
+        match = _SCREENSHOT_RE.search(longrepr_text)
+        if not match:
+            return
+
+        screenshot_path = match.group(1).strip()
+        path = Path(screenshot_path)
+        if not path.exists():
+            return
+
+        # Embed as base64 so the report is portable (no file:// dependency).
+        import base64
+        img_data = base64.b64encode(path.read_bytes()).decode("ascii")
+
+        if not hasattr(report, "extras"):
+            report.extras = []
+
+        report.extras.append(
+            extras.image(
+                f"data:image/png;base64,{img_data}",
+                name="Failure Screenshot",
+            )
+        )
+        report.extras.append(
+            extras.text(screenshot_path, name="Screenshot Path")
+        )
+    except Exception:  # noqa: BLE001
+        pass  # diagnostics must never break test reporting
+
 
 
 @pytest.fixture(scope="session")
