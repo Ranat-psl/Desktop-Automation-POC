@@ -147,8 +147,14 @@ class TestRecorderServiceStartStop:
             status = svc.stop()
             assert "my_named_flow" in status.saved_path.name
 
-    def test_stop_json_format_is_list(self, tmp_path) -> None:
-        """Verify the saved JSON is a list (Day 6 format compatibility)."""
+    def test_stop_json_format_is_envelope(self, tmp_path) -> None:
+        """Verify the saved JSON uses the versioned envelope format {meta, actions}.
+
+        The format changed from a flat list (Day 6) to a dict envelope in the
+        click-reliability phase so that recording-level metadata (screen resolution)
+        can be stored alongside actions.  Backward-compat load still handles
+        flat lists.
+        """
         svc = _make_service()
         mouse_mock = MagicMock(return_value=MagicMock(start=MagicMock(), stop=MagicMock(), join=MagicMock()))
         kb_mock = MagicMock(return_value=MagicMock(start=MagicMock(), stop=MagicMock(), join=MagicMock()))
@@ -157,7 +163,10 @@ class TestRecorderServiceStartStop:
             svc.start(name="format_check", recordings_dir=str(tmp_path))
             status = svc.stop()
             data = json.loads(status.saved_path.read_text(encoding="utf-8"))
-            assert isinstance(data, list)
+            assert isinstance(data, dict), "New format must be an envelope dict"
+            assert "actions" in data, "Envelope must contain 'actions' key"
+            assert "meta" in data, "Envelope must contain 'meta' key"
+            assert isinstance(data["actions"], list)
 
     def test_action_count_is_non_negative(self, tmp_path) -> None:
         svc = _make_service()
@@ -235,57 +244,65 @@ class TestRecorderUIInstantiation:
         # Prevent mainloop from blocking tests
         monkeypatch.setattr(tk.Tk, "mainloop", lambda self: None)
 
-    def test_ui_can_be_instantiated(self) -> None:
+    def _build_screen(self):
         from ui.recorder_ui import RecorderUI
+
+        root = tk.Tk()
+        root.withdraw()
+        screen = RecorderUI(root)
+        screen.grid(row=0, column=0)
+        root.update_idletasks()
+        return root, screen
+
+    def test_ui_can_be_instantiated(self) -> None:
         try:
-            app = RecorderUI()
-            app.withdraw()  # hide the window
-            app.destroy()
+            root, screen = self._build_screen()
+            assert screen.winfo_exists() == 1
+            root.destroy()
         except tk.TclError as exc:
             pytest.skip(f"No display available: {exc}")
 
-    def test_ui_default_directory_is_recordings(self) -> None:
-        from ui.recorder_ui import RecorderUI
+    def test_ui_default_directory_shows_workspace_prompt(self) -> None:
+        """Without a workspace selected, dir field shows a prompt instead of a raw path."""
         try:
-            app = RecorderUI()
-            app.withdraw()
-            assert app._dir_var.get() == "recordings"
-            app.destroy()
+            root, screen = self._build_screen()
+            # No app_controller is provided in _build_screen, so no workspace is
+            # available.  The field must not silently default to the project-root
+            # recordings directory; it should prompt the user to select a workspace.
+            dir_val = screen._dir_var.get()
+            assert dir_val != "recordings", (
+                "Directory must not silently fall back to the project-root 'recordings' directory"
+            )
+            root.destroy()
         except tk.TclError as exc:
             pytest.skip(f"No display available: {exc}")
 
     def test_ui_start_btn_initially_enabled(self) -> None:
-        from ui.recorder_ui import RecorderUI
         try:
-            app = RecorderUI()
-            app.withdraw()
-            assert str(app._start_btn["state"]) == "normal"
-            app.destroy()
+            root, screen = self._build_screen()
+            assert str(screen._start_btn["state"]) == "normal"
+            root.destroy()
         except tk.TclError as exc:
             pytest.skip(f"No display available: {exc}")
 
     def test_ui_stop_btn_initially_disabled(self) -> None:
-        from ui.recorder_ui import RecorderUI
         try:
-            app = RecorderUI()
-            app.withdraw()
-            assert str(app._stop_btn["state"]) == "disabled"
-            app.destroy()
+            root, screen = self._build_screen()
+            assert str(screen._stop_btn["state"]) == "disabled"
+            root.destroy()
         except tk.TclError as exc:
             pytest.skip(f"No display available: {exc}")
 
     def test_ui_empty_name_shows_error(self) -> None:
-        from ui.recorder_ui import RecorderUI
         try:
-            app = RecorderUI()
-            app.withdraw()
-            app._name_var.set("")
+            root, screen = self._build_screen()
+            screen._name_var.set("")
             # Call _start_recording directly (bypasses thread) to keep test deterministic
-            app._clear_error()
-            app._start_recording(name="", directory="recordings")
-            app.update_idletasks()
+            screen._clear_error()
+            screen._start_recording(name="", directory="recordings")
+            root.update()
             # After start with empty name, the error label should be set
-            assert app._error_var.get() != ""
-            app.destroy()
+            assert screen._error_var.get() != ""
+            root.destroy()
         except tk.TclError as exc:
             pytest.skip(f"No display available: {exc}")

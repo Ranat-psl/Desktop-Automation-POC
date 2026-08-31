@@ -180,10 +180,10 @@ class TestActionNormalizerClickEvents:
             norm.push({"type": "click", "x": 0, "y": 0, "button": "left"})
             actions = norm.flush()
 
-        # First action = TYPE for buffered "Hi", second = CLICK
+        # Buffered text is emitted as target-independent TYPE, then CLICK.
         assert len(actions) == 2
         assert actions[0].action_type is ActionType.TYPE
-        assert actions[0].value == "Hi"
+        assert actions[0].locator is None
         assert actions[1].action_type is ActionType.CLICK
 
     def test_multiple_clicks_produce_multiple_actions(self) -> None:
@@ -202,44 +202,74 @@ class TestActionNormalizerKeyEvents:
 
     def test_printable_chars_accumulate(self) -> None:
         norm = ActionNormalizer()
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 1, "y": 1, "button": "left"})
         for ch in "Hello":
             norm.push({"type": "key_press", "key": ch})
         actions = norm.flush()
-        assert len(actions) == 1
-        assert actions[0].action_type is ActionType.TYPE
-        assert actions[0].value == "Hello"
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        assert len(type_actions) == 1
+        assert type_actions[0].value == "Hello"
+        assert type_actions[0].locator == fake_locator
 
     def test_flush_returns_empty_when_no_events(self) -> None:
         norm = ActionNormalizer()
         actions = norm.flush()
         assert actions == []
 
-    def test_modifier_keys_are_ignored(self) -> None:
+    def test_modifier_keys_alone_produce_no_hotkey(self) -> None:
+        """Pressing modifier keys without a subsequent regular key produces no HOTKEY."""
         norm = ActionNormalizer()
-        for key in ("shift", "ctrl", "alt", "caps_lock"):
+        # caps_lock is a standalone KEY; shift/ctrl/alt alone produce nothing.
+        for key in ("shift", "ctrl", "alt"):
             norm.push({"type": "key_press", "key": key})
         actions = norm.flush()
         assert actions == []
 
     def test_enter_key_flushes_text_and_records_special(self) -> None:
         norm = ActionNormalizer()
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 2, "y": 2, "button": "left"})
         for ch in "ok":
             norm.push({"type": "key_press", "key": ch})
         norm.push({"type": "key_press", "key": "enter"})
         actions = norm.flush()
-        # Expect TYPE "ok", then TYPE "<enter>"
-        assert len(actions) == 2
-        assert actions[0].value == "ok"
-        assert actions[1].value == "<enter>"
-        assert actions[1].metadata.get("special_key") is True
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        key_actions = [a for a in actions if a.action_type is ActionType.KEY]
+        # New design: Enter → KEY action (not TYPE); text "ok" → one TYPE
+        assert len(type_actions) == 1
+        assert type_actions[0].value == "ok"
+        assert type_actions[0].locator == fake_locator
+        assert len(key_actions) == 1
+        assert key_actions[0].value == "enter"
 
     def test_tab_key_flushes_text(self) -> None:
         norm = ActionNormalizer()
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 3, "y": 3, "button": "left"})
         norm.push({"type": "key_press", "key": "a"})
         norm.push({"type": "key_press", "key": "tab"})
         actions = norm.flush()
-        assert actions[0].value == "a"
-        assert actions[1].value == "<tab>"
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        key_actions = [a for a in actions if a.action_type is ActionType.KEY]
+        # New design: Tab → KEY action; "a" → TYPE
+        assert len(type_actions) == 1
+        assert type_actions[0].value == "a"
+        assert type_actions[0].locator == fake_locator
+        assert len(key_actions) == 1
+        assert key_actions[0].value == "tab"
 
     def test_key_release_events_are_ignored(self) -> None:
         norm = ActionNormalizer()
@@ -262,6 +292,18 @@ class TestActionNormalizerKeyEvents:
         type_action = next(a for a in actions if a.action_type is ActionType.TYPE and not a.metadata.get("special_key"))
         assert type_action.locator == fake_locator
 
+    def test_type_without_locator_is_target_independent(self) -> None:
+        """Without a prior click, TYPE is emitted with locator=None and target_independent metadata."""
+        norm = ActionNormalizer()
+        norm.push({"type": "key_press", "key": "a"})
+        norm.push({"type": "key_press", "key": "b"})
+        actions = norm.flush()
+
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        assert len(type_actions) == 1
+        assert type_actions[0].locator is None
+        assert type_actions[0].metadata.get("target_independent") is True
+
 
 class TestCommandModifierSuppression:
     """Characters typed while ctrl/alt/cmd is held must never reach the buffer.
@@ -270,70 +312,95 @@ class TestCommandModifierSuppression:
     combinations that must not appear in saved actions.
     """
 
-    def test_ctrl_c_produces_no_actions(self) -> None:
-        """Ctrl+C (the stop shortcut) must not generate any TYPE action."""
+    def test_ctrl_c_produces_hotkey_action(self) -> None:
+        """Ctrl+C is now recorded as a HOTKEY action (not suppressed)."""
         norm = ActionNormalizer()
         norm.push({"type": "key_press", "key": "ctrl"})
         norm.push({"type": "key_press", "key": "c"})
         norm.push({"type": "key_release", "key": "c"})
         norm.push({"type": "key_release", "key": "ctrl"})
         actions = norm.flush()
-        assert actions == [], f"Expected no actions but got: {actions}"
+        assert len(actions) == 1
+        assert actions[0].action_type is ActionType.HOTKEY
+        assert actions[0].value == "ctrl+c"
 
-    def test_ctrl_c_variant_ctrl_l(self) -> None:
-        """ctrl_l (left Control key) also suppresses characters."""
+    def test_ctrl_l_c_variant_produces_hotkey(self) -> None:
+        """ctrl_l (left Control key) + c produces HOTKEY ctrl+c."""
         norm = ActionNormalizer()
         norm.push({"type": "key_press", "key": "ctrl_l"})
         norm.push({"type": "key_press", "key": "c"})
         norm.push({"type": "key_release", "key": "c"})
         norm.push({"type": "key_release", "key": "ctrl_l"})
         actions = norm.flush()
-        assert actions == []
+        assert len(actions) == 1
+        assert actions[0].action_type is ActionType.HOTKEY
+        assert actions[0].value == "ctrl+c"
 
-    def test_ctrl_r_suppresses_character(self) -> None:
+    def test_ctrl_r_produces_hotkey(self) -> None:
         norm = ActionNormalizer()
         norm.push({"type": "key_press", "key": "ctrl_r"})
         norm.push({"type": "key_press", "key": "r"})
         norm.push({"type": "key_release", "key": "r"})
         norm.push({"type": "key_release", "key": "ctrl_r"})
         actions = norm.flush()
-        assert actions == []
+        assert len(actions) == 1
+        assert actions[0].action_type is ActionType.HOTKEY
+        assert actions[0].value == "ctrl+r"
 
-    def test_alt_f4_produces_no_type_action(self) -> None:
+    def test_alt_f4_produces_hotkey(self) -> None:
         norm = ActionNormalizer()
         norm.push({"type": "key_press", "key": "alt"})
-        norm.push({"type": "key_press", "key": "f4"})  # f4 is in _MODIFIER_KEYS already
+        norm.push({"type": "key_press", "key": "f4"})
         norm.push({"type": "key_release", "key": "f4"})
         norm.push({"type": "key_release", "key": "alt"})
         actions = norm.flush()
-        assert actions == []
+        assert len(actions) == 1
+        assert actions[0].action_type is ActionType.HOTKEY
+        assert actions[0].value == "alt+f4"
 
-    def test_cmd_q_produces_no_action(self) -> None:
+    def test_cmd_q_produces_hotkey(self) -> None:
         norm = ActionNormalizer()
         norm.push({"type": "key_press", "key": "cmd"})
         norm.push({"type": "key_press", "key": "q"})
         norm.push({"type": "key_release", "key": "q"})
         norm.push({"type": "key_release", "key": "cmd"})
         actions = norm.flush()
-        assert actions == []
+        assert len(actions) == 1
+        assert actions[0].action_type is ActionType.HOTKEY
+        assert actions[0].value == "cmd+q"
 
     def test_characters_after_modifier_released_are_recorded(self) -> None:
         """Once ctrl is released, subsequent characters must be recorded normally."""
         norm = ActionNormalizer()
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 4, "y": 4, "button": "left"})
         norm.push({"type": "key_press", "key": "ctrl"})
-        norm.push({"type": "key_press", "key": "c"})       # suppressed
+        norm.push({"type": "key_press", "key": "c"})       # → HOTKEY ctrl+c
         norm.push({"type": "key_release", "key": "c"})
         norm.push({"type": "key_release", "key": "ctrl"})  # modifier released
         norm.push({"type": "key_press", "key": "h"})       # should be recorded
         norm.push({"type": "key_press", "key": "i"})
         actions = norm.flush()
-        assert len(actions) == 1
-        assert actions[0].action_type is ActionType.TYPE
-        assert actions[0].value == "hi"
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        hotkey_actions = [a for a in actions if a.action_type is ActionType.HOTKEY]
+        assert len(hotkey_actions) == 1
+        assert hotkey_actions[0].value == "ctrl+c"
+        assert len(type_actions) == 1
+        assert type_actions[0].value == "hi"
 
     def test_text_before_ctrl_c_is_preserved(self) -> None:
         """Text typed before the stop shortcut must not be lost."""
         norm = ActionNormalizer()
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 5, "y": 5, "button": "left"})
         for ch in "hello":
             norm.push({"type": "key_press", "key": ch})
         norm.push({"type": "key_press", "key": "ctrl"})
@@ -341,13 +408,23 @@ class TestCommandModifierSuppression:
         norm.push({"type": "key_release", "key": "c"})
         norm.push({"type": "key_release", "key": "ctrl"})
         actions = norm.flush()
-        # The buffered "hello" is flushed; Ctrl+C contributes nothing.
-        assert len(actions) == 1
-        assert actions[0].value == "hello"
+        # "hello" is flushed by the ctrl press; Ctrl+C emits HOTKEY.
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        hotkey_actions = [a for a in actions if a.action_type is ActionType.HOTKEY]
+        assert len(type_actions) == 1
+        assert type_actions[0].value == "hello"
+        assert len(hotkey_actions) == 1
+        assert hotkey_actions[0].value == "ctrl+c"
 
     def test_ctrl_chord_in_middle_of_typing_session(self) -> None:
         """Ctrl+S (save shortcut) mid-session must not corrupt surrounding text."""
         norm = ActionNormalizer()
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 6, "y": 6, "button": "left"})
         for ch in "foo":
             norm.push({"type": "key_press", "key": ch})
         norm.push({"type": "key_press", "key": "ctrl"})
@@ -357,24 +434,31 @@ class TestCommandModifierSuppression:
         for ch in "bar":
             norm.push({"type": "key_press", "key": ch})
         actions = norm.flush()
-        # "foo" flushed at click boundary; Ctrl+S suppressed; "bar" accumulates
-        # Both survive as separate TYPE actions because the ctrl press flushes
-        # the buffer (modifier press doesn't flush, only click/terminator does).
-        # "foo" and "bar" end up in a single buffer since no flush boundary hit.
-        # Actually: ctrl press triggers nothing special — buffer continues.
-        # After ctrl release, "bar" appends to same buffer, so result is "foobar".
-        assert len(actions) == 1
-        assert actions[0].value == "foobar"
+        # ctrl press flushes buffer → "foo" TYPE, then HOTKEY ctrl+s, then "bar" TYPE
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        hotkey_actions = [a for a in actions if a.action_type is ActionType.HOTKEY]
+        assert len(type_actions) == 2
+        assert type_actions[0].value == "foo"
+        assert type_actions[1].value == "bar"
+        assert len(hotkey_actions) == 1
+        assert hotkey_actions[0].value == "ctrl+s"
 
     def test_flush_clears_held_modifiers(self) -> None:
         """flush() must reset modifier tracking so the next session starts clean."""
         norm = ActionNormalizer()
         norm.push({"type": "key_press", "key": "ctrl"})  # hold ctrl
         norm.flush()  # reset state
+        fake_locator = Locator(by="auto_id", value="Editor")
+        with patch(
+            "framework.recorder.action_normalizer._resolve_locator_at",
+            return_value=fake_locator,
+        ):
+            norm.push({"type": "click", "x": 7, "y": 7, "button": "left"})
         norm.push({"type": "key_press", "key": "c"})     # ctrl no longer held after flush
         actions = norm.flush()
-        assert len(actions) == 1
-        assert actions[0].value == "c"
+        type_actions = [a for a in actions if a.action_type is ActionType.TYPE]
+        assert len(type_actions) == 1
+        assert type_actions[0].value == "c"
 
 
 class TestActionNormalizerNormalizeCompat:
@@ -428,7 +512,8 @@ class TestRecorderEventCapture:
         rec = Recorder(name="flow", recordings_dir=tmp_path)
         rec.start()
 
-        with patch("framework.recorder.action_normalizer._resolve_locator_at", return_value=None):
+        fake_locator = Locator(by="auto_id", value="InputBox")
+        with patch("framework.recorder.action_normalizer._resolve_locator_at", return_value=fake_locator):
             rec._on_raw_event({"type": "click", "x": 5, "y": 5, "button": "left"})
             rec._on_raw_event({"type": "key_press", "key": "a"})
             rec._on_raw_event({"type": "key_press", "key": "b"})
@@ -440,6 +525,7 @@ class TestRecorderEventCapture:
         assert actions[0].action_type is ActionType.CLICK
         assert actions[1].action_type is ActionType.TYPE
         assert actions[1].value == "ab"
+        assert actions[1].locator == fake_locator
 
     def test_recorder_save_persists_to_disk(self, tmp_path: Path) -> None:
         rec = Recorder(name="my_flow", recordings_dir=tmp_path)

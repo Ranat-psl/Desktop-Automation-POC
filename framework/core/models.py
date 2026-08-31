@@ -9,6 +9,8 @@ class ActionType(str, Enum):
     LAUNCH = "launch"
     CLICK = "click"
     TYPE = "type"
+    KEY = "key"       # single key press: Enter, Escape, F5, arrow keys, etc.
+    HOTKEY = "hotkey" # simultaneous modifier+key: Ctrl+C, Win+R, Ctrl+Shift+S
     WAIT = "wait"
     ASSERT_EXISTS = "assert_exists"
     ASSERT_TEXT = "assert_text"

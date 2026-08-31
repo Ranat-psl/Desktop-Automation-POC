@@ -65,8 +65,13 @@ class RecorderService:
     def is_recording(self) -> bool:
         return self._status.state == RecorderState.RECORDING
 
-    def start(self, name: str, recordings_dir: str = "recordings") -> RecorderStatus:
+    def start(self, name: str, recordings_dir: str = "recordings", excluded_rect: tuple[int, int, int, int] | None = None) -> RecorderStatus:
         """Validate inputs and start the recorder.
+
+        *excluded_rect* is an optional ``(left, top, right, bottom)`` screen
+        coordinate tuple for the DA application window.  Clicks inside this
+        rectangle are silently ignored so that recorder controls never pollute
+        the recorded test actions.
 
         Returns the updated :class:`RecorderStatus`.
         """
@@ -87,7 +92,11 @@ class RecorderService:
 
         # --- Delegate to Recorder -------------------------------------
         try:
-            self._recorder = Recorder(name=name, recordings_dir=recordings_dir)
+            self._recorder = Recorder(
+                name=name,
+                recordings_dir=recordings_dir,
+                excluded_rect=excluded_rect,
+            )
             self._recorder.start()
         except Exception as exc:  # noqa: BLE001
             _log.exception("Recorder.start() raised an exception")

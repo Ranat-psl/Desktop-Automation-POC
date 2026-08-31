@@ -47,11 +47,16 @@ class Recorder:
         self,
         name: str,
         recordings_dir: str | Path = "recordings",
+        excluded_rect: tuple[int, int, int, int] | None = None,
     ) -> None:
         self.name = name
+        self._excluded_rect = excluded_rect
         self._store = RecordingStore(base_dir=recordings_dir)
         self._normalizer = ActionNormalizer()
-        self._listener = EventListener(on_event=self._on_raw_event)
+        self._listener = EventListener(
+            on_event=self._on_raw_event,
+            excluded_rect=excluded_rect,
+        )
         self._start_time: float | None = None
         self._stop_time: float | None = None
 
@@ -66,7 +71,10 @@ class Recorder:
             return
         self._normalizer = ActionNormalizer()  # fresh state each recording
         self._start_time = time.monotonic()
-        self._listener = EventListener(on_event=self._on_raw_event)
+        self._listener = EventListener(
+            on_event=self._on_raw_event,
+            excluded_rect=self._excluded_rect,
+        )
         self._listener.start()
         _log.info("Recording started — name=%r", self.name)
 

@@ -15,14 +15,25 @@ class EventListener:
     Captures mouse left-click and keyboard events and forwards raw event
     dicts to a registered callback for normalization.
 
+    *excluded_rect* is an optional ``(left, top, right, bottom)`` tuple that
+    describes screen coordinates of the DA application's own window.  Any
+    mouse click whose coordinates fall within that rectangle is silently
+    ignored so that DA-app controls (Stop Recording, Start Recording, nav
+    buttons, etc.) never become recorded test actions.
+
     Raw event dict shapes:
         Mouse click:   {"type": "click", "x": int, "y": int, "button": str}
         Key press:     {"type": "key_press", "key": str}
         Key release:   {"type": "key_release", "key": str}
     """
 
-    def __init__(self, on_event: Callable[[dict], None]) -> None:
+    def __init__(
+        self,
+        on_event: Callable[[dict], None],
+        excluded_rect: tuple[int, int, int, int] | None = None,
+    ) -> None:
         self._on_event = on_event
+        self._excluded_rect = excluded_rect  # (left, top, right, bottom)
         self._mouse_listener: mouse.Listener | None = None
         self._keyboard_listener: keyboard.Listener | None = None
         self._lock = threading.Lock()
@@ -88,6 +99,18 @@ class EventListener:
             return  # Ignore release events — we record on press only.
         if button is not mouse.Button.left:
             return  # Only record left-clicks for automation purposes.
+
+        # Filter out clicks on the DA application's own window so that
+        # recorder controls (Stop, Start, Save, nav buttons) are never
+        # captured as test actions.
+        if self._excluded_rect is not None:
+            left, top, right, bottom = self._excluded_rect
+            if left <= x <= right and top <= y <= bottom:
+                _log.debug(
+                    "Click at (%d, %d) is inside DA app window — ignored", x, y
+                )
+                return
+
         event = {"type": "click", "x": x, "y": y, "button": button.name}
         _log.debug("Mouse event: %s", event)
         try:

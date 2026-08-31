@@ -5,3 +5,20 @@ __pycache__/
 reports/*
 recordings/*
 .vscode/
+
+# Temporary debug/analysis scripts and log files at project root
+_debug_type.py
+_debug_type2.py
+_validate_keyboard_engine.py
+_validate_notepad_type.py
+analyze_tests.py
+check_failures.py
+debug_callback.py
+rt.py
+run_tests2.py
+run_tests_summary.py
+show_failures.py
+
+# Captured text log files
+*.txt
+

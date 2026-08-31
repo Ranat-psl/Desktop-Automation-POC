@@ -6,37 +6,55 @@ from typing import Any
 from pywinauto import Desktop
 
 from framework.core.models import Action, ActionType, Locator
+from framework.driver.screen_info import get_screen_size
 
 _log = logging.getLogger(__name__)
 
-# Special keys that are treated as text terminators — when seen, any buffered
-# text is flushed as a TYPE action before handling the special key itself.
-_TEXT_FLUSH_KEYS = {"enter", "tab", "escape"}
+# ---------------------------------------------------------------------------
+# Key classification tables
+# ---------------------------------------------------------------------------
 
-# Command modifiers: when any of these is held, character keys are suppressed
-# entirely (e.g. Ctrl+C, Alt+F4 must not produce a buffered 'c' or '4').
-_COMMAND_MODIFIERS = {
-    "ctrl", "ctrl_l", "ctrl_r",
-    "alt", "alt_l", "alt_r", "alt_gr",
-    "cmd", "cmd_l", "cmd_r",
-}
-
-# Special keys that represent modifier / non-character keystrokes we ignore
-# for typing accumulation (shift, ctrl, alt, etc.).
-_MODIFIER_KEYS = {
+# Modifier keys — tracked in _held_modifiers but never produce standalone actions.
+# When held + another key is pressed → HOTKEY action.
+_MODIFIER_KEYS = frozenset({
     "shift", "shift_l", "shift_r",
     "ctrl", "ctrl_l", "ctrl_r",
     "alt", "alt_l", "alt_r", "alt_gr",
     "cmd", "cmd_l", "cmd_r",
-    "caps_lock", "num_lock", "scroll_lock",
+})
+
+# Canonical short names for modifier keys (used in HOTKEY value strings).
+_MODIFIER_CANONICAL = {
+    "ctrl": "ctrl", "ctrl_l": "ctrl", "ctrl_r": "ctrl",
+    "alt": "alt", "alt_l": "alt", "alt_r": "alt", "alt_gr": "alt",
+    "shift": "shift", "shift_l": "shift", "shift_r": "shift",
+    "cmd": "cmd", "cmd_l": "cmd", "cmd_r": "cmd",
+}
+
+# Preferred modifier ordering in HOTKEY value strings.
+_MODIFIER_ORDER = ("ctrl", "alt", "shift", "cmd")
+
+# Keys that produce a standalone KEY action (and flush any text buffer first).
+# Everything not in _MODIFIER_KEYS and not printable ends up here.
+_STANDALONE_KEYS = frozenset({
+    "enter", "return",
+    "escape",
+    "tab",
+    "backspace",
+    "delete",
     "f1", "f2", "f3", "f4", "f5", "f6",
     "f7", "f8", "f9", "f10", "f11", "f12",
-    "print_screen", "pause",
-    "insert", "home", "end", "page_up", "page_down",
     "left", "right", "up", "down",
-    "delete", "backspace",
+    "home", "end",
+    "page_up", "page_down",
+    "insert",
+    "print_screen",
+    "pause",
+    "caps_lock", "num_lock", "scroll_lock",
+    "space",
     "media_play_pause", "media_volume_up", "media_volume_down",
-}
+    "media_previous", "media_next",
+})
 
 
 class ActionNormalizer:
@@ -109,48 +127,65 @@ class ActionNormalizer:
         locator = _resolve_locator_at(x, y)
         self._last_click_locator = locator
 
+        screen_w, screen_h = get_screen_size()
         action = Action(
             action_type=ActionType.CLICK,
             locator=locator,
-            metadata={"recorded_x": x, "recorded_y": y},
+            metadata={
+                "recorded_x": x,
+                "recorded_y": y,
+                "screen_width": screen_w,
+                "screen_height": screen_h,
+            },
         )
         self._actions.append(action)
-        _log.debug("Recorded click: locator=%s", locator)
+        _log.debug("Recorded click: locator=%s  coords=(%d,%d)  screen=%dx%d", locator, x, y, screen_w, screen_h)
 
     def _handle_key_press(self, event: dict[str, Any]) -> None:
         key: str = event.get("key", "")
+        if not key:
+            return
 
-        if key in _TEXT_FLUSH_KEYS:
-            # Flush text, then record a special-key action.
+        # --- Modifier key down: track and wait for the combination ----
+        if key in _MODIFIER_KEYS:
+            self._held_modifiers.add(_MODIFIER_CANONICAL[key])
+            return
+
+        # --- Any modifier is currently held → HOTKEY action -----------
+        if self._held_modifiers:
             self._flush_text_buffer()
+            combo = _build_hotkey_value(self._held_modifiers, key)
             self._actions.append(
                 Action(
-                    action_type=ActionType.TYPE,
-                    locator=self._last_click_locator,
-                    value=f"<{key}>",
-                    metadata={"special_key": True},
+                    action_type=ActionType.HOTKEY,
+                    value=combo,
                 )
             )
+            _log.debug("Recorded hotkey: %r", combo)
             return
 
-        if key in _COMMAND_MODIFIERS:
-            self._held_modifiers.add(key)
+        # --- Standalone special key (Enter, Esc, F5, arrows …) -------
+        if key in _STANDALONE_KEYS:
+            self._flush_text_buffer()
+            # Normalise "return" → "enter" for consistency.
+            canonical_key = "enter" if key == "return" else key
+            self._actions.append(
+                Action(
+                    action_type=ActionType.KEY,
+                    value=canonical_key,
+                )
+            )
+            _log.debug("Recorded key: %r", canonical_key)
             return
 
-        if key in _MODIFIER_KEYS or not key:
-            return  # Ignore non-command modifiers and empty keys
-
-        # Suppress characters typed while a command modifier (ctrl/alt/cmd) is held.
-        # This prevents stop-shortcuts like Ctrl+C from leaking into saved actions.
-        if self._held_modifiers:
-            return
-
-        # Printable character — accumulate in buffer
+        # --- Printable character: accumulate into text buffer ---------
         self._text_buffer.append(key)
 
     def _handle_key_release(self, event: dict[str, Any]) -> None:
         key: str = event.get("key", "")
-        self._held_modifiers.discard(key)
+        canonical = _MODIFIER_CANONICAL.get(key)
+        if canonical:
+            self._held_modifiers.discard(canonical)
 
     def _flush_text_buffer(self) -> None:
         if not self._text_buffer:
@@ -159,11 +194,27 @@ class ActionNormalizer:
         self._text_buffer.clear()
         action = Action(
             action_type=ActionType.TYPE,
-            locator=self._last_click_locator,
+            locator=self._last_click_locator,  # may be None — target-independent typing
             value=text,
+            metadata={"target_independent": True} if self._last_click_locator is None else {},
         )
         self._actions.append(action)
-        _log.debug("Flushed typed text: %r", text)
+        _log.debug("Flushed typed text: %r (locator=%s)", text, self._last_click_locator)
+
+
+# ---------------------------------------------------------------------------
+# Hotkey helper
+# ---------------------------------------------------------------------------
+
+def _build_hotkey_value(held_modifiers: set[str], key: str) -> str:
+    """Build a canonical hotkey string, e.g. 'ctrl+c', 'cmd+r', 'ctrl+shift+s'.
+
+    Modifier order is always: ctrl → alt → shift → cmd → key.
+    The key itself is lower-cased.
+    """
+    parts = [m for m in _MODIFIER_ORDER if m in held_modifiers]
+    parts.append(key.lower())
+    return "+".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -194,23 +245,63 @@ def _resolve_locator_at(x: int, y: int) -> Locator | None:
         except Exception:
             element = control
 
-        auto_id = _safe_get(element, "automation_id")
-        if auto_id:
-            return Locator(by="auto_id", value=auto_id)
+        # Walk down to the deepest UIA element whose bounding rect contains
+        # (x, y).  from_point() often returns a container Pane rather than the
+        # specific child control the user actually clicked on.
+        element = _deepest_element_at(element, x, y)
 
-        ctrl_type = _safe_get(element, "friendly_class_name") or _safe_get(element, "class_name")
-        if ctrl_type:
-            return Locator(by="control_type", value=ctrl_type)
-
-        title = _safe_get(element, "window_text")
-        if title:
-            return Locator(by="title", value=title)
-
-        return None
+        return _locator_from_element(element)
 
     except Exception as exc:
         _log.debug("Locator resolution failed at (%d, %d): %s", x, y, exc)
         return None
+
+
+_GENERIC_LABELS = frozenset(
+    {"pane", "window", "desktop", "", "application", "dialog", "frame"}
+)
+
+
+def _locator_from_element(element: Any) -> Locator | None:
+    """Extract the best available Locator from a resolved UIA element."""
+    # 1. AutomationId — most stable across sessions
+    auto_id = _safe_get(element, "automation_id")
+    if auto_id:
+        return Locator(by="auto_id", value=auto_id)
+
+    # 2. Accessible name / window_text — meaningful label before structural type
+    for attr in ("name", "window_text"):
+        label = _safe_get(element, attr)
+        if label and len(label) <= 80 and label.lower() not in _GENERIC_LABELS:
+            return Locator(by="title", value=label)
+
+    # 3. Structural control type — last meaningful identifier
+    ctrl_type = _safe_get(element, "friendly_class_name") or _safe_get(element, "class_name")
+    if ctrl_type and ctrl_type.lower() not in _GENERIC_LABELS:
+        return Locator(by="control_type", value=ctrl_type)
+
+    return None
+
+
+def _deepest_element_at(start: Any, x: int, y: int) -> Any:
+    """Walk UIA children to find the most-specific element whose rect contains (x, y).
+
+    Returns *start* if no deeper child contains the point (safe fallback).
+    """
+    try:
+        children = start.children()
+    except Exception:
+        return start
+
+    for child in children:
+        try:
+            rect = child.rectangle()
+            if rect.left <= x <= rect.right and rect.top <= y <= rect.bottom:
+                return _deepest_element_at(child, x, y)
+        except Exception:
+            continue
+
+    return start
 
 
 def _safe_get(element: Any, attr: str) -> str:
